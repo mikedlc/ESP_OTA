@@ -1,21 +1,40 @@
-/*********
-  Rui Santos
-  Complete project details at https://randomnerdtutorials.com
-  Arduino IDE example: Examples > Arduino OTA > BasicOTA.ino
-*********/
+/***************************************************************************************************************************/
+/*
+    A base program template that has the following features:
+      1.3" OLED display
+      Wifi
+      OTA Updating
+      MQTT
+      Uptime Counter
 
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
+    Auther:     Various
+    Updated:    28th Aug 2024
+*/
+/***************************************************************************************************************************/
+
 
 //Device Information
 const char* ProgramID = "OTA Test";
 const char* SensorType = "None... OTA";
+const char* mqtt_topic = "MYTOPIC";
+const char* mqtt_unit = "Units";
+const char* mqtt_server_init = "homeassistant.local";
 
-// Replace with your network credentials
-const char* ssid = "WiFiFoFum";
-const char* password = "6316EarlyGlow";
+//OTA Stuff
+#include <ArduinoOTA.h>
+
+//Wifi Stuff
+//#include <WiFi.h> // Uncomment for ESP32
+#include <ESP8266WiFi.h> // Uncomment for D1 Mini ESP8266
+#include <ESP8266mDNS.h> // Uncomment for D1 mini ES8266
+#include <WiFiUdp.h> // Uncomment for D1 Mini ESP8266
+void printWifiStatus();
+//const char *ssid =	"LMWA-PumpHouse";		// cannot be longer than 32 characters!
+//const char *pass =	"ds42396xcr5";		//
+const char *ssid =	"WiFiFoFum";		// cannot be longer than 32 characters!
+const char *password =	"6316EarlyGlow";		//
+WiFiClient wifi_client;
+String wifistatustoprint;
 
 //For 1.3in displays
 #include <SPI.h>
@@ -37,19 +56,33 @@ int secsRemaining;
 int uptimeMinutes;
 char uptimeTotal[30];
 
+//MQTT Stuff
+#include <PubSubClient.h>
+void callback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+void sendMQTT(double mqtt_payload);
+const char* mqtt_server = mqtt_server_init;  //Your network's MQTT server (usually same IP address as Home Assistant server)
+PubSubClient pubsub_client(wifi_client);
+unsigned long lastMsg = 0;
+#define MSG_BUFFER_SIZE	(50)
+char msg[MSG_BUFFER_SIZE];
+int value = 0;
 
 void setup() {
   Serial.begin(9600);
   delay(1000);
   Serial.println("Booting");
-
+  Serial.println(__FILE__);
+  
   //1.3" OLED Setup
   delay(250); // wait for the OLED to power up
   display.begin(i2c_Address, true); // Address 0x3C default
   display.display(); //Turn on
   delay(2000);
+
   // Clear the buffer & start drawing
   display.clearDisplay(); // Clear display
+    display.setTextColor(SH110X_WHITE);
   display.drawPixel(64, 64, SH110X_WHITE); // draw a single pixel
   display.display();   // Show the display buffer on the hardware.
   delay(2000); // Wait a couple
@@ -141,26 +174,128 @@ display.println("Booting Program ID:");
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
+
+  //MQTT Setup
+  pubsub_client.setServer(mqtt_server, 1883);
+  pubsub_client.setCallback(callback);
+
+  //Start OTA
   ArduinoOTA.begin();
 
+  //Report done booting
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+  delay(5000);
 }
 
 void loop() {
   ArduinoOTA.handle();
 
+  currentMillis = millis();
+
+  //Calculat Uptime
+  uptimeSeconds=currentMillis/1000;
+  uptimeHours= uptimeSeconds/3600;
+  uptimeDays=uptimeHours/24;
+  secsRemaining=uptimeSeconds%3600;
+  uptimeMinutes=secsRemaining/60;
+  uptimeSeconds=secsRemaining%60;
+  sprintf(uptimeTotal,"Uptime %02dD:%02d:%02d:%02d",uptimeDays,uptimeHours,uptimeMinutes,uptimeSeconds);
+
 //buffer next display payload
   display.clearDisplay();
   display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
   display.setCursor(0, 0);
   display.print("Sensor: "); display.println(SensorType);
   display.print("Prog.ID: "); display.println(ProgramID);
   display.print("IP: "); display.println(WiFi.localIP());
+  display.print(uptimeTotal);
   display.display();
 
+  sendMQTT(0);
 
   delay(1000);
+}
+
+void printWifiStatus() {
+  // print the SSID of the network you're attached to:
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+
+  // print your WiFi shield's IP address:
+  IPAddress ip = WiFi.localIP();
+  Serial.print("IP Address: ");
+  Serial.println(ip);
+
+  Serial.print("Hostname: ");
+  Serial.println(WiFi.getHostname());
+
+  // print the received signal strength:
+  long rssi = WiFi.RSSI();
+  Serial.print("signal strength (RSSI):");
+  Serial.print(rssi);
+  Serial.println(" dBm");
+  Serial.println("");
+}
+
+//MQTT Callback
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (unsigned int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+
+}
+
+//connect MQTT if not
+void reconnect() {
+  // Loop until we're reconnected
+  while (!pubsub_client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random pubsub_client ID
+    String clientId = "PUMPSENSOR-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (pubsub_client.connect(clientId.c_str(), "mqttuser", "Quik5ilver7")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(pubsub_client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+void sendMQTT(double mqtt_payload) {
+
+  if (!pubsub_client.connected()) {
+    reconnect();
+  }
+
+  unsigned long now = millis();
+  if (now - lastMsg > 2000) {
+    lastMsg = now;
+    ++value;
+
+    Serial.println("Sending alert via MQTT...");
+    Serial.print("Topic: "); Serial.print(mqtt_topic); Serial.print(" Payload: "); Serial.print(mqtt_payload); Serial.print(" Unit: "); Serial.println(mqtt_unit);
+
+    //msg variable contains JSON string to send to MQTT server
+    //snprintf (msg, MSG_BUFFER_SIZE, "\{\"amps\": %4.1f, \"humidity\": %4.1f\}", temperature, humidity);
+    //snprintf (msg, MSG_BUFFER_SIZE, "\{\"amps\": %4.2f\}", mqtt_payload);
+    snprintf (msg, MSG_BUFFER_SIZE, "{\"%s\" %4.2f}", mqtt_unit, mqtt_payload);
+    //Due to a quirk with escaping special characters, if you're using an ESP8266 you will need to use this instead:
+    //snprintf (msg, MSG_BUFFER_SIZE, "{\"temperature\": %4.1f, \"humidity\": %4.1f}", temperature, humidity);
+
+    Serial.print("Publishing message: ");
+    Serial.println(msg);
+    pubsub_client.publish(mqtt_topic, msg);
+  }
+
 }
